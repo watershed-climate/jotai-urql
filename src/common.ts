@@ -9,7 +9,7 @@ import type { Getter } from 'jotai/vanilla'
 import { atom } from 'jotai/vanilla'
 import { atomWithObservable } from 'jotai/vanilla/utils'
 import type { Source } from 'wonka'
-import { pipe, toObservable } from 'wonka'
+import { fromValue, pipe, toObservable } from 'wonka'
 import { suspenseAtom } from './suspenseAtom'
 
 export type InitialOperationResult<Data, Variables extends AnyVariables> = Omit<
@@ -59,34 +59,40 @@ export const createAtoms = <Args, Result extends OperationResult, ActionResult>(
     urqlReactCompatibleInitialState as Result
   )
 
-  const baseStatusAtom = atom((get) => {
+  const observableAtom = atom((get) => {
     const isPaused = getPause(get)
     const client = getClient(get)
-    const source = isPaused ? null : execute(client, getArgs(get))
-    if (!source) {
-      return initialLoadAtom
-    }
-    const observable = pipe(source, toObservable)
+    const source = isPaused
+      ? fromValue(urqlReactCompatibleInitialState as Result)
+      : execute(client, getArgs(get))
+
+    return pipe(source, toObservable)
+  })
+  // Note: if the function for `initialValue` accepts `get`, these atoms could be combined into one atom
+  const resultAtomWithSuspense = atomWithObservable<Result>(
+    (get) => get(observableAtom),
+    {}
+  )
+  const resultAtomWithoutSuspense = atomWithObservable<Result>(
+    (get) => get(observableAtom),
+    { initialValue: urqlReactCompatibleInitialState as Result }
+  )
+  const baseStatusAtom = atom((get) => {
+    if (!get(observableAtom)) return initialLoadAtom
     // Enables or disables suspense based off global suspense atom
-    const initialState = get(suspenseAtom)
-      ? {}
-      : { initialValue: urqlReactCompatibleInitialState }
-    const resultAtom = atomWithObservable<Result>(
-      () => observable,
-      initialState as any
-    )
+    const resultAtom = get(suspenseAtom)
+      ? resultAtomWithSuspense
+      : resultAtomWithoutSuspense
     if (process.env.NODE_ENV !== 'production') {
       resultAtom.debugPrivate = true
     }
-
     return resultAtom
   })
-
   // This atom is used ONLY when for the `getPause` is returning true.
   // This is needed to keep and show previous result in cache when the query is getting paused dynamically (meaning resultAtom would return `urqlReactCompatibleInitialState`).
   // E.g. *getPause is false* state 1 -> state 2 -> state 3 *getPause set to true* -> null (return cached state 3) -> *getPause is false* -> state 4
   const prevResultCacheInCaseOfDynamicPausing = atom<{
-    cache?: Result
+    cache?: Result | Promise<Result>
   }>({})
   prevResultCacheInCaseOfDynamicPausing.onMount = (setAtom) => {
     return () => {
